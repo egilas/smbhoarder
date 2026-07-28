@@ -3,20 +3,19 @@ import csv
 
 def main():
     total = 0.0
-    # Reading CSV from standard input
+    count = 0
     csv_reader = csv.reader(sys.stdin)
     for row in csv_reader:
+        if not row or row[0] == "ID":
+            continue
         try:
-            # Summing up the third field
-            total += float(row[2])
+            total += float(row[4])
+            count += 1
         except ValueError:
-            # Ignore rows where the third field is not a number
             continue
         except IndexError:
-            # Ignore rows that don't have a third field
             continue
-    print(f"Total sum of field 3: {total}")
+    print(f"Selected: {count} files, {total:.3f} MB")
 
 if __name__ == "__main__":
     main()
-

@@ -6,6 +6,12 @@ from termcolor import colored
 import os
 from datetime import datetime
 import traceback
+import sys
+
+
+def error_exit(message, exit_code=1):
+    print(colored(message, 'red'), file=sys.stderr)
+    sys.exit(exit_code)
 
 
 def read_config(config_file, section):
@@ -17,12 +23,12 @@ def read_config(config_file, section):
     if section not in config:
         error_exit(f"Section {section} not found in the configuration file {config_file}.")
     
-    domain = config[section].get('DOMAIN')
+    domain = config[section].get('DOMAIN', fallback='')
     username = config[section].get('USERNAME')
     password = config[section].get('PASSWORD')
     
-    if not domain or not username or not password:
-        error_exit(f"DOMAIN, USERNAME, or PASSWORD is missing in the {section} section.")
+    if not username or password is None:
+        error_exit(f"USERNAME or PASSWORD is missing in the {section} section.")
     
     return domain, username, password
 
@@ -49,7 +55,7 @@ def list_files(smb, csvwriter, hosten, share, counter: int = 0, subfolder="") ->
                 print(f"{counter}, {hosten}, {share}, {os.path.join(subfolder, file.get_longname())}, {file_size_mb}, {file.get_filesize()}, {creation_time}")
 
     except Exception as e:
-        print(f"Failet her da, på filen {file} med exception {e}")
+        print(f"Failed while processing {file}: {e}")
         traceback.print_exc()
         return counter
     return counter
@@ -66,14 +72,17 @@ def main():
 
     args = parser.parse_args()
     host = args.host
-    username = args.username
-    password = args.password
-    domain = args.domain
     if not host:
         print("You gotta specify the host!")
         exit(1)
 
-    if not (username or password or domain):
+    if args.username or args.password or args.domain:
+        if not args.username or args.password is None:
+            error_exit("When using command-line credentials, both --username and --password are required.")
+        username = args.username
+        password = args.password
+        domain = args.domain or ""
+    else:
         domain,username,password=read_config(args.config,args.section)
 
 
@@ -83,6 +92,7 @@ def main():
         smb.login(username, password, domain)
         shares = smb.listShares()
         print(f"Connected to {host}. Listing files...")
+        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
         with open(args.output, mode='w', newline='') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=["ID", "Host","Share","Path","SizeMB","SizeBytes","Created"])
             writer.writeheader()
@@ -96,8 +106,7 @@ def main():
 
         smb.logoff()
     except Exception as e:
-        print(f"Failed to connect to {host}: {e}")
+        error_exit(f"Failed to connect to {host}: {e}")
 
 if __name__ == "__main__":
     main()
-
