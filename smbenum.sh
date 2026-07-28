@@ -13,6 +13,8 @@ Required:
 Optional Execution Settings:
   -t <threads>       Number of parallel threads (default: 30)
   -proxychains       Use proxychains -q when running smbenum_worker.py
+  -verbose           Print every discovered file. By default, smbenum shows only
+                     a compact progress line.
   -skip-credcheck    Skip the preflight login check. Use only when you intentionally
                      want to try the credentials against every target.
   -cred-timeout <s>  Timeout for the preflight credential check (default: 10)
@@ -44,6 +46,7 @@ section="DEFAULT"
 workers="./workers"
 hosts_file=""
 use_proxychains=false
+verbose=false
 skip_credcheck=false
 cred_timeout=10
 sessiondir="./sessionlogs"
@@ -77,6 +80,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -proxychains)
       use_proxychains=true
+      shift
+      ;;
+    -verbose)
+      verbose=true
       shift
       ;;
     -skip-credcheck)
@@ -171,6 +178,8 @@ tmpdir=$(mktemp -d)
 audit_initialized=false
 targets_file="$tmpdir/targets.txt"
 todo_file="$tmpdir/todo.txt"
+progress_stop_file="$tmpdir/progress.stop"
+progress_pid=""
 
 cleanup() {
   rm -rf "$tmpdir"
@@ -213,6 +222,10 @@ share_marker() {
   printf '%s||%s' "$1" "$2" | md5sum | awk '{print $1}'
 }
 
+host_marker() {
+  printf '%s||__host__' "$1" | md5sum | awk '{print $1}'
+}
+
 write_marker() {
   local target="$1"
   local share="$2"
@@ -220,6 +233,13 @@ write_marker() {
   local marker
   marker=$(share_marker "$target" "$share")
   printf '%s\t%s\n' "$target" "$share" > "$marker_dir/$marker.$suffix"
+}
+
+write_host_done() {
+  local target="$1"
+  local marker
+  marker=$(host_marker "$target")
+  printf '%s\n' "$target" > "$marker_dir/$marker.hostdone"
 }
 
 write_audit() {
@@ -250,7 +270,125 @@ write_audit() {
   mv "$tmp_audit" "$audit_file"
 }
 
+count_marker_suffix() {
+  local suffix="$1"
+  local files=()
+
+  shopt -s nullglob
+  files=("$marker_dir"/*"$suffix")
+  shopt -u nullglob
+  printf '%s' "${#files[@]}"
+}
+
+sum_count_markers() {
+  local total=0
+  local value count_file
+  local count_files=()
+
+  shopt -s nullglob
+  count_files=("$marker_dir"/*.count)
+  shopt -u nullglob
+
+  for count_file in "${count_files[@]}"; do
+    IFS= read -r value < "$count_file" || value=0
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+      total=$((total + value))
+    fi
+  done
+
+  printf '%s' "$total"
+}
+
+progress_bar() {
+  local done="$1"
+  local total="$2"
+  local width=28
+  local filled=0
+  local empty=0
+  local bar=""
+  local empty_bar=""
+
+  if [[ "$total" -gt 0 ]]; then
+    filled=$((done * width / total))
+  fi
+  empty=$((width - filled))
+  printf -v bar '%*s' "$filled" ''
+  bar=${bar// /#}
+  printf -v empty_bar '%*s' "$empty" ''
+  empty_bar=${empty_bar// /-}
+  printf '[%s%s]' "$bar" "$empty_bar"
+}
+
+print_progress_line() {
+  local completed_hosts active_threads shares_seen shares_done files_seen bar percent line
+
+  completed_hosts=$(count_marker_suffix ".hostdone")
+  active_threads=$(count_marker_suffix ".active")
+  shares_seen=$(count_marker_suffix ".seen")
+  shares_done=$(count_marker_suffix ".done")
+  files_seen=$(sum_count_markers)
+  bar=$(progress_bar "$completed_hosts" "${#targets[@]}")
+  percent=0
+  if [[ "${#targets[@]}" -gt 0 ]]; then
+    percent=$((completed_hosts * 100 / ${#targets[@]}))
+  fi
+
+  line=$(printf '[*] %s %3d%% | hosts %d/%d | shares %d/%d | threads %d/%d | files %d' \
+    "$bar" "$percent" "$completed_hosts" "${#targets[@]}" "$shares_done" "$shares_seen" "$active_threads" "$threads" "$files_seen")
+
+  if [[ -t 2 && "${TERM:-}" != "dumb" ]]; then
+    printf '\r%-120s' "$line" >&2
+  else
+    printf '%s\n' "$line" >&2
+  fi
+}
+
+progress_monitor() {
+  local sleep_time=5
+  if [[ -t 2 && "${TERM:-}" != "dumb" ]]; then
+    sleep_time=1
+  fi
+
+  while [[ ! -f "$progress_stop_file" ]]; do
+    print_progress_line
+    sleep "$sleep_time"
+  done
+  print_progress_line
+  if [[ -t 2 && "${TERM:-}" != "dumb" ]]; then
+    printf '\n' >&2
+  fi
+}
+
+start_progress_monitor() {
+  if $verbose; then
+    return
+  fi
+  rm -f "$progress_stop_file"
+  progress_monitor &
+  progress_pid=$!
+}
+
+stop_progress_monitor() {
+  if [[ -n "${progress_pid:-}" ]]; then
+    : > "$progress_stop_file"
+    wait "$progress_pid" 2>/dev/null || true
+    progress_pid=""
+  fi
+}
+
+countdown() {
+  local seconds=5
+  local current
+
+  echo "[*] Enumeration starts in $seconds seconds. Press Ctrl-C to abort."
+  for ((current=seconds; current>=1; current--)); do
+    printf '    %d...\n' "$current"
+    sleep 1
+  done
+}
+
 handle_interrupt() {
+  stop_progress_monitor
   kill_descendants "$$"
   if $audit_initialized; then
     write_audit
@@ -306,6 +444,8 @@ for target in "${targets[@]}"; do
 
   if [[ "$seen_count" -eq 0 || "$pending_count" -gt 0 ]]; then
     printf '%s\n' "$target" >> "$todo_file"
+  else
+    write_host_done "$target"
   fi
 done
 
@@ -335,7 +475,11 @@ else
   echo "[*] Skipping credential preflight check."
 fi
 
+rm -f "$marker_dir"/*.active
+countdown
+
 run_status=0
+start_progress_monitor
 xargs -r -I{} -P "$threads" bash -c '
   target=$1
   csvdir=$2
@@ -344,13 +488,32 @@ xargs -r -I{} -P "$threads" bash -c '
   worker_script=$5
   marker_dir=$6
   use_proxychains=$7
+  verbose=$8
+
+  host_hash=$(printf "%s||__host__" "$target" | md5sum | awk "{print \$1}")
+  active_file="$marker_dir/$host_hash.active"
+  : > "$active_file"
+  trap "rm -f \"$active_file\"" EXIT
+
+  verbose_args=()
+  if [[ "$verbose" == "true" ]]; then
+    verbose_args=(--verbose)
+  fi
 
   if [[ "$use_proxychains" == "true" ]]; then
-    proxychains -q python3 "$worker_script" "$target" --output-dir "$csvdir" --marker-dir "$marker_dir" -c "$cfile" -s "$section"
+    proxychains -q python3 "$worker_script" "$target" --output-dir "$csvdir" --marker-dir "$marker_dir" -c "$cfile" -s "$section" "${verbose_args[@]}"
   else
-    python3 "$worker_script" "$target" --output-dir "$csvdir" --marker-dir "$marker_dir" -c "$cfile" -s "$section"
+    python3 "$worker_script" "$target" --output-dir "$csvdir" --marker-dir "$marker_dir" -c "$cfile" -s "$section" "${verbose_args[@]}"
   fi
-' _ {} "$csvdir" "$section" "$cfile" "$worker_script" "$marker_dir" "$use_proxychains" < "$todo_file" || run_status=$?
+  status=$?
+
+  if [[ "$status" -eq 0 ]]; then
+    printf "%s\n" "$target" > "$marker_dir/$host_hash.hostdone"
+  fi
+
+  exit "$status"
+' _ {} "$csvdir" "$section" "$cfile" "$worker_script" "$marker_dir" "$use_proxychains" "$verbose" < "$todo_file" || run_status=$?
+stop_progress_monitor
 
 write_audit
 

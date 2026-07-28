@@ -67,35 +67,46 @@ def write_marker(marker_dir, host, share, suffix):
         handle.write(f"{host}\t{share}\n")
 
 
+def write_count(marker_dir, host, share, count):
+    if not marker_dir:
+        return
+    os.makedirs(marker_dir, exist_ok=True)
+    with open(marker_path(marker_dir, host, share, "count"), "w", encoding="utf-8") as handle:
+        handle.write(f"{count}\n")
+
+
 def is_done(marker_dir, host, share):
     return bool(marker_dir and os.path.exists(marker_path(marker_dir, host, share, "done")))
 
-def list_files(smb, csvwriter, hosten, share, counter: int = 0, subfolder="") -> int:
+def list_files(smb, csvwriter, hosten, share, counter: int = 0, subfolder="", verbose=False, marker_dir=None) -> int:
     try:
         files = smb.listPath(share, subfolder + '\\*')
     except Exception as e:
-        print(f"{colored('Failed to list path','red')} \\\\{hosten}\\{share}\\{subfolder}: {e}")
+        print(f"{colored('Failed to list path','red')} \\\\{hosten}\\{share}\\{subfolder}: {e}", file=sys.stderr)
         return counter
 
     try:
         for file in files:
             if file.is_directory():
                 if file.get_longname() not in [".", ".."]:
-                    counter=list_files(smb, csvwriter,hosten, share, counter,os.path.join(subfolder, file.get_longname()))
+                    counter=list_files(smb, csvwriter, hosten, share, counter, os.path.join(subfolder, file.get_longname()), verbose, marker_dir)
 
             else:
                 file_size_mb = round(file.get_filesize() / (1024 * 1024),3)
                 creation_time = datetime.fromtimestamp(file.get_ctime_epoch()).strftime('%Y-%m-%d')
                 counter=counter+1
-                counterhost=str(counter)+"-"+hosten;
                 #csvwriter.writerow({"ID":counter, "Host":hosten,"Share":share,"Path":os.path.join(hosten,share,subfolder, file.get_longname()), "SizeMB":file_size_mb, "SizeBytes":file.get_filesize(), "Created":creation_time, "CreatedCtime":file.get_ctime_epoch()})
                 csvwriter.writerow({"ID":counter, "Host":hosten,"Share":share,"Path":os.path.join(subfolder, file.get_longname()), "SizeMB":file_size_mb, "SizeBytes":file.get_filesize(), "Created":creation_time})
-                print(f"{counter}, {hosten}, {share}, {os.path.join(subfolder, file.get_longname())}, {file_size_mb}, {file.get_filesize()}, {creation_time}")
+                if counter % 100 == 0:
+                    write_count(marker_dir, hosten, share, counter)
+                if verbose:
+                    print(f"{counter}, {hosten}, {share}, {os.path.join(subfolder, file.get_longname())}, {file_size_mb}, {file.get_filesize()}, {creation_time}")
 
     except Exception as e:
-        print(f"Failed while processing {file}: {e}")
+        print(f"Failed while processing {file}: {e}", file=sys.stderr)
         traceback.print_exc()
         return counter
+    write_count(marker_dir, hosten, share, counter)
     return counter
 
 def main():
@@ -107,6 +118,7 @@ def main():
     parser.add_argument("-o", "--output", required=False, help="Output CSV file for legacy all-shares mode")
     parser.add_argument("--output-dir", required=False, help="Output directory for per-share CSV files")
     parser.add_argument("--marker-dir", required=False, help="Directory for per-share seen/done marker files")
+    parser.add_argument("--verbose", action="store_true", help="Print every discovered file")
     parser.add_argument('-c', '--config', type=str, default='creds.ini', help='Specify the configuration file (default: creds.ini)')
     parser.add_argument('-s', '--section', type=str, default='DEFAULT', help='Specify the section in the configuration file (default: DEFAULT)')
 
@@ -134,27 +146,32 @@ def main():
         smb = SMBConnection(host, host)
         smb.login(username, password, domain)
         shares = smb.listShares()
-        print(f"Connected to {host}. Listing files...")
+        if args.verbose:
+            print(f"Connected to {host}. Listing files...")
 
         if args.output_dir:
             os.makedirs(args.output_dir, exist_ok=True)
             for share in shares:
                 share_name = share['shi1_netname'].strip().rstrip('\x00')
                 if share_name.lower() in SKIP_SHARES:
-                    print(f"Skipping share because {share_name}")
+                    if args.verbose:
+                        print(f"Skipping share because {share_name}")
                     continue
 
                 write_marker(args.marker_dir, host, share_name, "seen")
                 if is_done(args.marker_dir, host, share_name):
-                    print(f"Skipping completed share: {share_name}")
+                    if args.verbose:
+                        print(f"Skipping completed share: {share_name}")
                     continue
 
                 output = share_csv_path(args.output_dir, host, share_name, args.section)
-                print(f"Share: {share_name}")
+                if args.verbose:
+                    print(f"Share: {share_name}")
                 with open(output, mode='w', newline='') as csvfile:
                     writer = csv.DictWriter(csvfile, fieldnames=CSV_FIELDS)
                     writer.writeheader()
-                    list_files(smb, writer, host, share_name, 0)
+                    count = list_files(smb, writer, host, share_name, 0, verbose=args.verbose, marker_dir=args.marker_dir)
+                write_count(args.marker_dir, host, share_name, count)
                 write_marker(args.marker_dir, host, share_name, "done")
         else:
             os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
@@ -164,10 +181,12 @@ def main():
                 for share in shares:
                     share_name = share['shi1_netname'].strip().rstrip('\x00')
                     if share_name.lower() in SKIP_SHARES:
-                        print(f"Skipping share because {share_name}")
+                        if args.verbose:
+                            print(f"Skipping share because {share_name}")
                     else:
-                        print(f"Share: {share_name}")
-                        counter=list_files(smb, writer, host, share_name, counter)
+                        if args.verbose:
+                            print(f"Share: {share_name}")
+                        counter=list_files(smb, writer, host, share_name, counter, verbose=args.verbose)
 
         smb.logoff()
     except Exception as e:

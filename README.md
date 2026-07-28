@@ -80,9 +80,15 @@ Useful options:
 
 ```bash
 ./smbenum.sh -h hosts.gnmap -s USER2 -t 50
+./smbenum.sh -h hosts.txt -s DEFAULT -verbose
 ./smbenum.sh -h hosts.txt -s DEFAULT -skip-credcheck
 ./smbenum.sh -h hosts.txt -s DEFAULT -sessiondir engagement-audit
 ```
+
+Enumeration waits for a 5 second countdown before the threaded scan starts. By
+default it keeps worker output quiet and prints a simple ASCII progress line with
+host, share, thread, and file counters. Use `-verbose` to print every discovered
+file instead.
 
 ## Search And Download
 
@@ -112,12 +118,25 @@ Chunk modes are `host-share`, `host`, `extension`, and `none`.
 
 ## Diff Access Between Users
 
-Compare two enumeration directories and write rows that only the second account
-can see:
+Put all users' enumeration CSV files in the same directory, then show per-user
+file counts per host/share:
 
 ```bash
-./csvdiff.sh ./DEFAULT ./USER2 ./diff-DEFAULT-USER2
+./smbdiff -csv csv
 ```
 
-Diffing is grouped by `Host` and `Share`, and row comparison ignores the `ID`
-column so post-run renumbering does not create false differences.
+Rows where the user counts differ are highlighted when color output is available.
+To write files that are unique to one user compared to another:
+
+```bash
+./smbdiff -csv csv --unique USER2 DEFAULT
+./smbdiff -csv csv --unique USER2 DEFAULT --outdir unique-user2-default
+```
+
+The default output directory is `unique-to-USER1-vs-USER2`. Output files follow
+the normal `<host>-<share>-<user>.csv` naming convention and row comparison
+ignores the `ID` column so post-run renumbering does not create false
+differences.
+
+`csvdiff.sh` is still present for older two-directory workflows, but `smbdiff` is
+the preferred interface.
