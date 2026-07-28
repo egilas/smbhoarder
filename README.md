@@ -47,16 +47,34 @@ Before threaded enumeration starts, `smbenum.sh` validates the credentials
 against one reachable target. If the password is wrong, it stops instead of
 trying the same bad password against every host.
 
+Enumeration writes one CSV per host/share:
+
+```text
+csv/
+  192.0.2.10-myshare-DEFAULT.csv
+  192.0.2.10-SYSVOL-DEFAULT.csv
+```
+
+Each CSV still includes the `Share` column. A host is processed by one worker at
+a time; the per-share CSV split does not create multiple simultaneous SMB
+workers against the same host.
+
 Resume/audit state is written to `sessionlogs/` by default. The session filename
 is based on the MD5 of the hosts file and the credential section, and each audit
 line is:
 
 ```text
-192.0.2.10,true
-192.0.2.11,false
+192.0.2.10,myshare,true
+192.0.2.10,SYSVOL,false
 ```
 
-Run the same command again to skip completed hosts and retry only pending hosts.
+Run the same command again to skip completed host/share pairs and retry only
+pending shares. Resume is share-granular, not file-granular: if a scan is
+interrupted inside a very large share, that share is retried from the beginning.
+
+After a successful run, IDs in the first CSV column are renumbered globally
+across the output directory for that credential section, so IDs are unique across
+hosts and shares in the run.
 
 Useful options:
 
@@ -100,3 +118,6 @@ can see:
 ```bash
 ./csvdiff.sh ./DEFAULT ./USER2 ./diff-DEFAULT-USER2
 ```
+
+Diffing is grouped by `Host` and `Share`, and row comparison ignores the `ID`
+column so post-run renumbering does not create false differences.

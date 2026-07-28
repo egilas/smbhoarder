@@ -24,8 +24,11 @@ Optional Credential Parameters:
 Optional Paths and Output:
   -workers <dir>     Directory containing smbenum_worker.py (default: ./workers)
   -csvdir <dir>      Output directory for result CSVs (default: ./csv). Will be created if it doesn't exist.
+                     Enumeration writes one CSV per host/share:
+                     <host>-<share>-<section>.csv
   -sessiondir <dir>  Directory for resumable audit logs (default: ./sessionlogs).
                      Session log names are <hosts-file-md5>-<credential-section>.csv
+                     Audit rows are host,share,finished.
 
 Other:
   -help              Show this help message
@@ -123,6 +126,12 @@ if [[ ! -f "$credcheck_script" ]]; then
   exit 1
 fi
 
+csvfilter_script="$workers/csvfilter.py"
+if [[ ! -f "$csvfilter_script" ]]; then
+  echo "Error: '$csvfilter_script' not found."
+  exit 1
+fi
+
 # Check creds file
 if [[ ! -f "$cfile" ]]; then
   echo "Error: Credential file '$cfile' not found."
@@ -167,6 +176,17 @@ cleanup() {
   rm -rf "$tmpdir"
 }
 
+kill_descendants() {
+  local parent="$1"
+  local child
+
+  while IFS= read -r child; do
+    [[ -z "$child" ]] && continue
+    kill_descendants "$child"
+    kill -TERM "$child" 2>/dev/null || true
+  done < <(pgrep -P "$parent" 2>/dev/null || true)
+}
+
 # Parse hosts from gnmap if applicable
 if grep -q "445/open" "$hosts_file"; then
   echo "[*] Detected gnmap format. Extracting hosts with 445/open..."
@@ -189,25 +209,49 @@ audit_file="$sessiondir/${session_id}.csv"
 marker_dir="$sessiondir/${session_id}.done"
 mkdir -p "$marker_dir"
 
-host_marker() {
-  printf '%s' "$1" | md5sum | awk '{print $1}'
+share_marker() {
+  printf '%s||%s' "$1" "$2" | md5sum | awk '{print $1}'
+}
+
+write_marker() {
+  local target="$1"
+  local share="$2"
+  local suffix="$3"
+  local marker
+  marker=$(share_marker "$target" "$share")
+  printf '%s\t%s\n' "$target" "$share" > "$marker_dir/$marker.$suffix"
 }
 
 write_audit() {
   local tmp_audit="${audit_file}.tmp.$$"
+  local seen_files=()
+  local seen_file marker done_file target share
+
   : > "$tmp_audit"
-  for target in "${targets[@]}"; do
-    marker=$(host_marker "$target")
-    if [[ -f "$marker_dir/$marker.done" ]]; then
-      printf '%s,true\n' "$target" >> "$tmp_audit"
+
+  shopt -s nullglob
+  seen_files=("$marker_dir"/*.seen)
+  shopt -u nullglob
+
+  for seen_file in "${seen_files[@]}"; do
+    IFS=$'\t' read -r target share < "$seen_file" || continue
+    marker=${seen_file##*/}
+    done_file="$marker_dir/${marker%.seen}.done"
+    if [[ -f "$done_file" ]]; then
+      printf '%s,%s,true\n' "$target" "$share" >> "$tmp_audit"
     else
-      printf '%s,false\n' "$target" >> "$tmp_audit"
+      printf '%s,%s,false\n' "$target" "$share" >> "$tmp_audit"
     fi
   done
+
+  if [[ -s "$tmp_audit" ]]; then
+    sort -t, -k1,1 -k2,2 "$tmp_audit" -o "$tmp_audit"
+  fi
   mv "$tmp_audit" "$audit_file"
 }
 
 handle_interrupt() {
+  kill_descendants "$$"
   if $audit_initialized; then
     write_audit
     echo
@@ -222,10 +266,15 @@ trap cleanup EXIT
 
 if [[ -f "$audit_file" ]]; then
   echo "[*] Resuming session: $audit_file"
-  while IFS=, read -r target finished; do
+  while IFS=, read -r target share finished extra; do
+    if [[ -n "${extra:-}" || -z "${target:-}" || -z "${share:-}" || -z "${finished:-}" ]]; then
+      echo "Warning: ignoring invalid audit line: ${target:-},${share:-},${finished:-}${extra:+,$extra}" >&2
+      continue
+    fi
+
+    write_marker "$target" "$share" "seen"
     if [[ "$finished" == "true" ]]; then
-      marker=$(host_marker "$target")
-      printf '%s\n' "$target" > "$marker_dir/$marker.done"
+      write_marker "$target" "$share" "done"
     fi
   done < "$audit_file"
 else
@@ -239,8 +288,23 @@ audit_initialized=true
 : > "$todo_file"
 for target in "${targets[@]}"; do
   printf '%s\n' "$target" >> "$targets_file"
-  marker=$(host_marker "$target")
-  if [[ ! -f "$marker_dir/$marker.done" ]]; then
+  seen_count=0
+  pending_count=0
+
+  shopt -s nullglob
+  seen_files=("$marker_dir"/*.seen)
+  shopt -u nullglob
+  for seen_file in "${seen_files[@]}"; do
+    IFS=$'\t' read -r seen_target seen_share < "$seen_file" || continue
+    [[ "$seen_target" != "$target" ]] && continue
+    seen_count=$((seen_count + 1))
+    marker=${seen_file##*/}
+    if [[ ! -f "$marker_dir/${marker%.seen}.done" ]]; then
+      pending_count=$((pending_count + 1))
+    fi
+  done
+
+  if [[ "$seen_count" -eq 0 || "$pending_count" -gt 0 ]]; then
     printf '%s\n' "$target" >> "$todo_file"
   fi
 done
@@ -282,18 +346,10 @@ xargs -r -I{} -P "$threads" bash -c '
   use_proxychains=$7
 
   if [[ "$use_proxychains" == "true" ]]; then
-    proxychains -q python3 "$worker_script" "$target" -o "$csvdir/${target}-${section}.csv" -c "$cfile" -s "$section"
+    proxychains -q python3 "$worker_script" "$target" --output-dir "$csvdir" --marker-dir "$marker_dir" -c "$cfile" -s "$section"
   else
-    python3 "$worker_script" "$target" -o "$csvdir/${target}-${section}.csv" -c "$cfile" -s "$section"
+    python3 "$worker_script" "$target" --output-dir "$csvdir" --marker-dir "$marker_dir" -c "$cfile" -s "$section"
   fi
-  status=$?
-
-  if [[ "$status" -eq 0 ]]; then
-    marker=$(printf "%s" "$target" | md5sum | awk "{print \$1}")
-    printf "%s\n" "$target" > "$marker_dir/$marker.done"
-  fi
-
-  exit "$status"
 ' _ {} "$csvdir" "$section" "$cfile" "$worker_script" "$marker_dir" "$use_proxychains" < "$todo_file" || run_status=$?
 
 write_audit
@@ -301,6 +357,14 @@ write_audit
 if [[ "$run_status" -ne 0 ]]; then
   echo "[!] One or more targets failed. Resume with the same hosts file and credential section to retry pending hosts."
   exit "$run_status"
+fi
+
+shopt -s nullglob
+csv_files=("$csvdir"/*-"$section".csv)
+shopt -u nullglob
+if [[ ${#csv_files[@]} -gt 0 ]]; then
+  echo "[*] Renumbering CSV IDs across ${#csv_files[@]} file(s)..."
+  python3 "$csvfilter_script" renumber "${csv_files[@]}"
 fi
 
 echo "[*] Enumeration complete. Session audit: $audit_file"

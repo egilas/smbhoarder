@@ -73,6 +73,35 @@ def command_filter(args):
             writer.writerow(row)
 
 
+def command_renumber(args):
+    next_id = args.start
+
+    for filename in sorted(args.files):
+        rows = []
+        with open(filename, newline="") as handle:
+            reader = csv.reader(handle)
+            for row in reader:
+                if not row:
+                    continue
+                if row[:len(FIELDS)] == FIELDS:
+                    continue
+                if len(row) < len(FIELDS):
+                    continue
+                row = row[:len(FIELDS)]
+                row[0] = str(next_id)
+                next_id += 1
+                rows.append(row)
+
+        tmp_filename = f"{filename}.tmp"
+        with open(tmp_filename, "w", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(FIELDS)
+            writer.writerows(rows)
+        os.replace(tmp_filename, filename)
+
+    print(f"Renumbered {next_id - args.start} rows across {len(args.files)} files.", file=sys.stderr)
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="CSV helpers for smbhoarder shell wrappers")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -89,6 +118,11 @@ def build_parser():
     filter_parser.add_argument("--mode", choices=["host", "host-share", "extension"], required=True)
     filter_parser.add_argument("--key", required=True)
     filter_parser.set_defaults(func=command_filter)
+
+    renumber = subparsers.add_parser("renumber", help="Rewrite CSV IDs globally across files")
+    renumber.add_argument("--start", type=int, default=1)
+    renumber.add_argument("files", nargs="+")
+    renumber.set_defaults(func=command_renumber)
 
     return parser
 
