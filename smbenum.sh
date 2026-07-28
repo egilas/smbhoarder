@@ -378,13 +378,9 @@ stop_progress_monitor() {
 
 countdown() {
   local seconds=5
-  local current
 
   echo "[*] Enumeration starts in $seconds seconds. Press Ctrl-C to abort."
-  for ((current=seconds; current>=1; current--)); do
-    printf '    %d...\n' "$current"
-    sleep 1
-  done
+  sleep "$seconds"
 }
 
 handle_interrupt() {

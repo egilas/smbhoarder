@@ -73,6 +73,88 @@ def command_filter(args):
             writer.writerow(row)
 
 
+def command_id(args):
+    writer = csv.writer(sys.stdout, lineterminator="\n")
+    found = False
+    for row, parsed in iter_rows(sys.stdin):
+        if parsed["ID"] == args.id:
+            writer.writerow(row)
+            found = True
+            if not args.all:
+                break
+
+    if not found:
+        print(f"No row found with ID {args.id}.", file=sys.stderr)
+        return 1
+    return 0
+
+
+def command_shares(args):
+    groups = defaultdict(lambda: {"count": 0, "sizemb": 0.0})
+    for _, row in iter_rows(sys.stdin):
+        key = (row["Host"], row["Share"])
+        groups[key]["count"] += 1
+        try:
+            groups[key]["sizemb"] += float(row["SizeMB"])
+        except ValueError:
+            pass
+
+    headers = ["Host", "Share", "Files", "SizeMB"]
+    rows = [
+        [host, share, str(info["count"]), f"{info['sizemb']:.3f}"]
+        for (host, share), info in sorted(groups.items(), reverse=args.sort == "desc")
+    ]
+
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    print("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    for row in rows:
+        print("  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)))
+
+
+def extension_label(path):
+    _, ext = os.path.splitext(path)
+    if not ext:
+        return "[no extension]"
+    return f"*{ext.lower()}"
+
+
+def command_extensions(args):
+    groups = defaultdict(lambda: {"count": 0, "sizemb": 0.0})
+
+    for _, row in iter_rows(sys.stdin):
+        key = extension_label(row["Path"])
+        groups[key]["count"] += 1
+        try:
+            groups[key]["sizemb"] += float(row["SizeMB"])
+        except ValueError:
+            pass
+
+    headers = ["Extension", "Files", "SizeMB"]
+    rows = [
+        [extension, str(info["count"]), f"{info['sizemb']:.3f}"]
+        for extension, info in sorted(
+            groups.items(),
+            key=lambda item: (
+                -item[1]["count"] if args.sort == "desc" else item[1]["count"],
+                item[0],
+            ),
+        )
+    ]
+
+    widths = [len(header) for header in headers]
+    for row in rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    print("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    for row in rows:
+        print("  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)))
+
+
 def command_renumber(args):
     next_id = args.start
 
@@ -119,6 +201,19 @@ def build_parser():
     filter_parser.add_argument("--key", required=True)
     filter_parser.set_defaults(func=command_filter)
 
+    id_parser = subparsers.add_parser("id", help="Print the CSV row matching one ID")
+    id_parser.add_argument("--id", required=True)
+    id_parser.add_argument("--all", action="store_true", help="Print all rows with the ID instead of the first")
+    id_parser.set_defaults(func=command_id)
+
+    shares = subparsers.add_parser("shares", help="Print host/share summary for a catalog")
+    shares.add_argument("--sort", choices=["asc", "desc"], default="asc")
+    shares.set_defaults(func=command_shares)
+
+    extensions = subparsers.add_parser("extensions", help="Print file extension statistics for a catalog")
+    extensions.add_argument("--sort", choices=["asc", "desc"], default="asc")
+    extensions.set_defaults(func=command_extensions)
+
     renumber = subparsers.add_parser("renumber", help="Rewrite CSV IDs globally across files")
     renumber.add_argument("--start", type=int, default=1)
     renumber.add_argument("files", nargs="+")
@@ -130,7 +225,9 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    args.func(args)
+    result = args.func(args)
+    if isinstance(result, int):
+        sys.exit(result)
 
 
 if __name__ == "__main__":

@@ -85,7 +85,7 @@ Useful options:
 ./smbenum.sh -h hosts.txt -s DEFAULT -sessiondir engagement-audit
 ```
 
-Enumeration waits for a 5 second countdown before the threaded scan starts. By
+Enumeration prints a 5 second start notice before the threaded scan starts. By
 default it keeps worker output quiet and prints a simple ASCII progress line with
 host, share, thread, and file counters. Use `-verbose` to print every discovered
 file instead.
@@ -99,10 +99,28 @@ file instead.
 fzf keybindings:
 
 ```text
+ENTER      download current entry and view it when supported
 TAB         select entry
 CTRL-A      toggle all
+CTRL-S      show host/share summary, sorted ascending
+ALT-S       show host/share summary, sorted descending
+CTRL-F      show extension statistics, sorted ascending by count
+ALT-F       show extension statistics, sorted descending by count
 CTRL-SPACE  download selected item(s)
 ```
+
+`CTRL-S`, `ALT-S`, and the extension statistics open scrollable fzf views. Many terminals
+do not expose `CTRL-SHIFT-F` as a distinct key from `CTRL-F`, so descending
+extension sort is bound to `ALT-F`.
+
+You can also download one row directly by ID:
+
+```bash
+./smbdl.sh -csv csv -s DEFAULT -cfile creds.ini -out dl -id 1234
+./smbdl.sh -csv csv -s DEFAULT -cfile creds.ini -out dl -id 1234 -view
+```
+
+`-view` opens supported text-like files with `cat <file> | fzf`.
 
 Large selections are passed to the downloader through a temporary file, avoiding
 shell argument-list limits. For large CSV indexes, `smbdl.sh` first asks you to
@@ -122,15 +140,15 @@ Put all users' enumeration CSV files in the same directory, then show per-user
 file counts per host/share:
 
 ```bash
-./smbdiff -csv csv
+./smbdiff.py -csv csv
 ```
 
 Rows where the user counts differ are highlighted when color output is available.
 To write files that are unique to one user compared to another:
 
 ```bash
-./smbdiff -csv csv --unique USER2 DEFAULT
-./smbdiff -csv csv --unique USER2 DEFAULT --outdir unique-user2-default
+./smbdiff.py -csv csv --unique USER2 DEFAULT
+./smbdiff.py -csv csv --unique USER2 DEFAULT --outdir unique-user2-default
 ```
 
 The default output directory is `unique-to-USER1-vs-USER2`. Output files follow
@@ -138,5 +156,5 @@ the normal `<host>-<share>-<user>.csv` naming convention and row comparison
 ignores the `ID` column so post-run renumbering does not create false
 differences.
 
-`csvdiff.sh` is still present for older two-directory workflows, but `smbdiff` is
-the preferred interface.
+`csvdiff.sh` is still present for older two-directory workflows, but
+`smbdiff.py` is the preferred interface.

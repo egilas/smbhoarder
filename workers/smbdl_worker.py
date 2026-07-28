@@ -34,7 +34,7 @@ def read_config(config_file, section):
 
     return domain, username, password
 
-def smb_download(domain, username, password, smb_path, output_file):
+def smb_download(domain, username, password, smb_path, output_file, quiet=False):
     """Download a file via SMB."""
     try:
         smbserver, sharename, path = smb_path.split('/', 2)
@@ -47,7 +47,10 @@ def smb_download(domain, username, password, smb_path, output_file):
     try:
         conn.login(username, password, domain)
         with open(output_file, 'wb') as f:
-            print(f"Trying to download {path}")
+            if quiet:
+                print(f"Trying to download {path}", file=sys.stderr)
+            else:
+                print(f"Trying to download {path}")
             conn.getFile(sharename, path, f.write)
     except Exception as e:
         error_donotexit(f"SMB download failed: {e}")
@@ -70,6 +73,10 @@ def main():
                         help='Specify what creds to use in the configuration file (default: DEFAULT)')
     parser.add_argument('-o', '--out', type=str, default='.',
                         help='Specify directory where files should be downloaded to. (default: ./)')
+    parser.add_argument('--print-paths', action='store_true',
+                        help='Print downloaded local paths, one per line.')
+    parser.add_argument('--quiet', action='store_true',
+                        help='Send status output to stderr and keep stdout machine-readable.')
 
     args = parser.parse_args()
 
@@ -103,16 +110,21 @@ def main():
 
      
         try:
-            if smb_download(domain, username, password, os.path.join(smb_host,smb_share,smb_path), output_file):
+            if smb_download(domain, username, password, os.path.join(smb_host,smb_share,smb_path), output_file, quiet=args.quiet):
                 fileprefix = ""
                 fileresult = ""
                 if args.runfile:
                     result = subprocess.run(['file', '-b', output_file], stdout=subprocess.PIPE)
                     fileprefix = "File info:"
                     fileresult = result.stdout.decode('utf-8').strip()
-                print("File downloaded as", colored(output_file_nopathprefix, 'green'), fileprefix, colored(fileresult, "blue"))
-                windows_path = r"\\" + os.path.join(smb_host,smb_share,smb_path).replace("/", "\\")
-                print("Share url:", colored(windows_path, 'yellow'))
+                if args.print_paths:
+                    print(output_file)
+                if not args.quiet:
+                    print("File downloaded as", colored(output_file_nopathprefix, 'green'), fileprefix, colored(fileresult, "blue"))
+                    windows_path = r"\\" + os.path.join(smb_host,smb_share,smb_path).replace("/", "\\")
+                    print("Share url:", colored(windows_path, 'yellow'))
+                elif not args.print_paths:
+                    print("File downloaded as", output_file, fileprefix, fileresult, file=sys.stderr)
             else:
                 failed = True
         except Exception as e:
