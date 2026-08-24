@@ -1,3 +1,4 @@
+
 # smbhoarder
 
 smbhoarder is a small set of SMB enumeration and download helpers for pentest
@@ -33,6 +34,11 @@ PASSWORD=pass2
 ```
 
 `DOMAIN` may be empty for local accounts. `USERNAME` and `PASSWORD` are required.
+
+## Workflow
+This is how you use the tools:
+
+<img width="1489" height="658" alt="workflow" src="https://github.com/egilas/smbhoarder/blob/main/workflow.png" />
 
 ## Enumerate Shares
 
