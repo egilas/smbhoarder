@@ -6,7 +6,12 @@ assignments. It uses Impacket for SMB access, writes searchable CSV indexes, and
 uses fzf as the interactive file picker.
 
 ## Install
+Kali/Debian/Ubuntu:
+```bash
+sudo apt-get install fzf file python3-termcolor python3-impacket
+```
 
+The pip-way:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
