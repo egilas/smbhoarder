@@ -195,6 +195,9 @@ cython_debug/
 .pypirc
 
 # smbhoarder local output
+/agent-output/
+/creds*.ini
+/unique-to-*/
 csv/
 dl/
 sessionlogs/

@@ -4,7 +4,7 @@ set -euo pipefail
 show_help() {
   cat <<EOF
 Usage:
-  $0 [-csv <csv_directory>] [-workers <dir_with_worker_script>] [-cfile <credential_file>] [-s <section>] [-out <output_dir>] [-chunk-threshold <rows>] [-chunk-mode <mode>] [-col <columns>] [--space=N] [-id <csv_id>] [-view] [-proxychains] [-help]
+  $0 [-csv <csv_directory>] [-workers <dir_with_worker_script>] [-cfile <credential_file>] [-s <section>] [-out <output_dir>] [-chunk-threshold <rows>] [-chunk-mode <mode>] [-col <columns>] [--space=N] [--rows <selected.csv|->] [-id <csv_id>] [-view] [-proxychains] [-help]
 
 Parameters:
   -csv           Directory containing one or more CSV files (*.csv). Default: ./csv
@@ -20,6 +20,9 @@ Parameters:
   -col           Visible columns in order, comma-separated (case-insensitive).
                  Default: id,host,sizemb,sizebytes,created,share,path
   --space=N      Spaces between columns (positive integer; default: 2).
+  --rows         Download every row in an explicit CSV selection (file or '-' for stdin).
+                 No fzf or catalog lookup; validates the whole selection first.
+                 Prints downloaded paths to stdout and diagnostics to stderr.
   -id            Download a single row by CSV ID and exit.
   -view          After a single-ID download, open supported text-like files with cat <file> | fzf.
   -proxychains   Use proxychains -q when calling the Python downloader
@@ -49,10 +52,19 @@ chunk_mode="host-share"
 columns="id,host,sizemb,sizebytes,created,share,path"
 column_spacing=2
 download_id=""
+selected_rows=""
 view_after_download=false
 
 # Parse args
 while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -csv|-workers|-cfile|-s|-out|-chunk-threshold|-chunk-mode|-id|--rows)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: $1 requires a value." >&2
+        exit 2
+      fi
+      ;;
+  esac
   case "$1" in
     -csv)
       csvdir="$2"
@@ -106,6 +118,10 @@ while [[ $# -gt 0 ]]; do
       columns="$2"
       shift 2
       ;;
+    --rows)
+      selected_rows="$2"
+      shift 2
+      ;;
     -id)
       download_id="$2"
       shift 2
@@ -130,47 +146,67 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$selected_rows" && ( -n "$download_id" || "$view_after_download" == true ) ]]; then
+  echo "Error: --rows cannot be combined with -id or -view." >&2
+  exit 2
+fi
+
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SCRIPT_PATH="$SCRIPT_DIR/$(basename -- "${BASH_SOURCE[0]}")"
 
-if [[ -z "$download_id" && -f "$workers/logo.txt" ]]; then
+if [[ -z "$download_id" && -z "$selected_rows" && -f "$workers/logo.txt" ]]; then
   cat "$workers/logo.txt" 
 fi
 # Check necessary files
 if [[ ! -f "$workers/smbdl_worker.py" ]]; then
-  echo "Error: '$workers/smbdl_worker.py' not found."
+  echo "Error: '$workers/smbdl_worker.py' not found." >&2
   exit 1
 fi
 
 if [[ ! -f "$workers/csvfilter.py" ]]; then
-  echo "Error: '$workers/csvfilter.py' not found."
+  echo "Error: '$workers/csvfilter.py' not found." >&2
   exit 1
 fi
 
-if [[ ! -f "$workers/sumsize.py" ]]; then
-  echo "Error: '$workers/sumsize.py' not found."
+if [[ -z "$selected_rows" && ! -f "$workers/sumsize.py" ]]; then
+  echo "Error: '$workers/sumsize.py' not found." >&2
   exit 1
 fi
 
 if [[ ! -f "$cfile" ]]; then
-  echo "Error: credential file '$cfile' not found."
+  echo "Error: credential file '$cfile' not found." >&2
   exit 1
 fi
 
 # Check for tools
-if [[ -z "$download_id" || "$view_after_download" == "true" ]] && ! command -v fzf &>/dev/null; then
-  echo "Error: fzf not found in PATH."
+if [[ ( -z "$download_id" && -z "$selected_rows" ) || "$view_after_download" == "true" ]] && ! command -v fzf &>/dev/null; then
+  echo "Error: fzf not found in PATH." >&2
   exit 1
 fi
 
 if ! command -v python3 &>/dev/null; then
-  echo "Error: python3 not found in PATH."
+  echo "Error: python3 not found in PATH." >&2
   exit 1
 fi
 
 if $use_proxychains && ! command -v proxychains &>/dev/null; then
-  echo "Error: proxychains not found in PATH."
+  echo "Error: proxychains not found in PATH." >&2
   exit 1
+fi
+
+# An explicit batch does not need an enumeration directory or interactive tools.
+if [[ -n "$selected_rows" ]]; then
+  batch_tmp=$(mktemp -d)
+  trap 'rm -rf "$batch_tmp"' EXIT
+  python3 "$workers/csvfilter.py" validate "$selected_rows" > "$batch_tmp/selected.csv"
+  mkdir -p "$out"
+  batch_cmd=(python3 "$workers/smbdl_worker.py" --quiet --print-paths --no-runfile
+             -c "$cfile" -s "$section" -o "$out")
+  if $use_proxychains; then
+    batch_cmd=(proxychains -q "${batch_cmd[@]}")
+  fi
+  "${batch_cmd[@]}" < "$batch_tmp/selected.csv"
+  exit $?
 fi
 
 if ! [[ "$column_spacing" =~ ^[1-9][0-9]*$ ]]; then
@@ -204,7 +240,7 @@ done
 
 # Check CSV directory
 if [[ ! -d "$csvdir" ]]; then
-  echo "Error: CSV directory '$csvdir' not found."
+  echo "Error: CSV directory '$csvdir' not found." >&2
   exit 1
 fi
 
@@ -214,13 +250,13 @@ mkdir -p "$out"
 case "$chunk_mode" in
   host-share|host|extension|none) ;;
   *)
-    echo "Error: -chunk-mode must be host-share, host, extension, or none."
+    echo "Error: -chunk-mode must be host-share, host, extension, or none." >&2
     exit 1
     ;;
 esac
 
 if ! [[ "$chunk_threshold" =~ ^[0-9]+$ ]]; then
-  echo "Error: -chunk-threshold must be a non-negative integer."
+  echo "Error: -chunk-threshold must be a non-negative integer." >&2
   exit 1
 fi
 
@@ -229,7 +265,7 @@ csv_files=("$csvdir"/*-"$section".csv)
 shopt -u nullglob
 
 if [[ ${#csv_files[@]} -eq 0 ]]; then
-  echo "Error: no CSV files matching '$csvdir/*-$section.csv'."
+  echo "Error: no CSV files matching '$csvdir/*-$section.csv'." >&2
   exit 1
 fi
 
@@ -258,7 +294,7 @@ python3 "$workers/csvfilter.py" catalog "${csv_files[@]}" > "$catalog"
 row_count=$(wc -l < "$catalog" | tr -d ' ')
 
 if [[ "$row_count" -eq 0 ]]; then
-  echo "Error: matching CSV files did not contain any downloadable rows."
+  echo "Error: matching CSV files did not contain any downloadable rows." >&2
   exit 1
 fi
 

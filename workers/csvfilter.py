@@ -2,6 +2,10 @@
 import argparse
 import base64
 import io
+import json
+import heapq
+from contextlib import nullcontext
+from datetime import date
 import csv
 import os
 import sys
@@ -19,13 +23,15 @@ def row_to_dict(row):
     return dict(zip(FIELDS, row[:len(FIELDS)]))
 
 
-def iter_rows(stream):
-    reader = csv.reader(stream)
+def iter_rows(stream, strict=False):
+    reader = csv.reader(stream, strict=strict)
     for row in reader:
         if not row:
             continue
-        if row[:len(FIELDS)] == FIELDS:
+        if row == FIELDS or (not strict and row[:len(FIELDS)] == FIELDS):
             continue
+        if strict and len(row) != len(FIELDS):
+            raise ValueError(f"CSV record ending on line {reader.line_num}: expected 7 fields, got {len(row)}")
         parsed = row_to_dict(row)
         if parsed:
             yield row[:len(FIELDS)], parsed
@@ -249,9 +255,201 @@ def command_renumber(args):
     print(f"Renumbered {next_id - args.start} rows across {len(args.files)} files.", file=sys.stderr)
 
 
+def nonnegative(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return number
+
+
+def iso_date(value):
+    try:
+        parsed = date.fromisoformat(value).isoformat()
+        if parsed != value:
+            raise ValueError("non-canonical date")
+        return parsed
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a date in YYYY-MM-DD format")
+
+
+def input_rows(args):
+    """Stream one source at a time; directory discovery avoids shell glob limits."""
+    if args.csv_dir:
+        files = sorted(entry.path for entry in os.scandir(args.csv_dir)
+                       if entry.is_file() and entry.name.endswith(f"-{args.section}.csv"))
+        if not files:
+            raise ValueError(f"no CSV files for section {args.section!r} in {args.csv_dir!r}")
+    else:
+        files = args.files or ["-"]
+    for filename in files:
+        context = nullcontext(sys.stdin) if filename == "-" else open(
+            filename, newline="", encoding="utf-8-sig")
+        with context as handle:
+            try:
+                yield from iter_rows(handle, strict=True)
+            except (ValueError, csv.Error) as exc:
+                raise ValueError(f"{filename}: {exc}") from exc
+
+
+def normalized_path(value):
+    return value.replace("\\", "/").casefold()
+
+
+def size_bytes(row):
+    size = int(row["SizeBytes"])
+    if size < 0:
+        raise ValueError("SizeBytes must be non-negative")
+    return size
+
+
+def matching_rows(args):
+    ids = set(args.id or [])
+    extensions = {value.casefold() if value.startswith(".") else "." + value.casefold()
+                  for value in args.extension or []}
+    prefix = normalized_path(args.path_prefix).rstrip("/") if args.path_prefix else None
+    for values, row in input_rows(args):
+        if ids and row["ID"] not in ids:
+            continue
+        if args.host and row["Host"].casefold() != args.host.casefold():
+            continue
+        if args.share and row["Share"].casefold() != args.share.casefold():
+            continue
+        path = normalized_path(row["Path"])
+        if prefix and path != prefix and not path.startswith(prefix + "/"):
+            continue
+        if extensions and os.path.splitext(path)[1] not in extensions:
+            continue
+        haystack = "/".join((row["Host"], row["Share"], row["Path"])).casefold()
+        if any(value.casefold() not in haystack for value in args.contains):
+            continue
+        if args.min_bytes is not None or args.max_bytes is not None:
+            size = size_bytes(row)
+            if args.min_bytes is not None and size < args.min_bytes:
+                continue
+            if args.max_bytes is not None and size > args.max_bytes:
+                continue
+        if args.created_after or args.created_before:
+            created = date.fromisoformat(row["Created"]).isoformat()
+            if args.created_after and created < args.created_after:
+                continue
+            if args.created_before and created > args.created_before:
+                continue
+        yield values, row
+
+
+def command_search(args):
+    writer = csv.writer(sys.stdout) if args.format == "csv" else None
+    if writer and not args.count:
+        writer.writerow(FIELDS)
+    matched = emitted = 0
+    for values, row in matching_rows(args):
+        matched += 1
+        if args.count or matched <= args.offset:
+            continue
+        if writer:
+            writer.writerow(values)
+        else:
+            print(json.dumps(row, ensure_ascii=True))
+        emitted += 1
+        if args.limit and emitted >= args.limit:
+            break
+    if args.count:
+        print(matched)
+    return 0
+
+
+def command_summary(args):
+    groups = {}
+    count = total = 0
+    for _, row in matching_rows(args):
+        size = size_bytes(row)
+        count += 1
+        total += size
+        if args.group_by == "host-share":
+            key = (row["Host"], row["Share"])
+            labels = {"Host": key[0], "Share": key[1]}
+        elif args.group_by == "host":
+            key = (row["Host"],)
+            labels = {"Host": key[0]}
+        else:
+            key = (os.path.splitext(normalized_path(row["Path"]))[1] or "[no extension]",)
+            labels = {"Extension": key[0]}
+        group = groups.setdefault(key, {**labels, "files": 0, "size_bytes": 0})
+        group["files"] += 1
+        group["size_bytes"] += size
+    # Only retain the requested top groups in the output ordering step.
+    ordered = heapq.nsmallest(args.limit, groups.items(),
+                             key=lambda item: (-item[1]["files"], item[0]))
+    print(json.dumps({"files": count, "size_bytes": total, "group_by": args.group_by,
+                      "group_count": len(groups), "groups": [group for _, group in ordered]},
+                     ensure_ascii=True))
+    return 0
+
+
+def command_validate(args):
+    """The shell spools this output completely before starting any downloads."""
+    writer = csv.writer(sys.stdout)
+    count = 0
+    for values, row in input_rows(args):
+        if not row["ID"].isascii() or not row["ID"].isdigit():
+            raise ValueError("download ID must contain only ASCII digits")
+        for field in ("Host", "Share"):
+            value = row[field]
+            if not value or value != value.strip() or any(c in value for c in "/\\\x00\r\n"):
+                raise ValueError(f"invalid download {field}")
+        path = row["Path"].replace("\\", "/")
+        if (not path or path != path.strip() or path.startswith("/") or
+                ".." in path.split("/") or "\x00" in path):
+            raise ValueError("download Path must be a relative path without '..' components")
+        writer.writerow(values)
+        count += 1
+    if not count:
+        raise ValueError("selection contains no downloadable rows")
+    return 0
+
+
+def add_input_options(parser):
+    parser.add_argument("files", nargs="*", help="CSV files; default or '-' reads stdin")
+    parser.add_argument("--csv-dir", help="Read *-SECTION.csv from a directory without shell globbing")
+    parser.add_argument("--section", default="DEFAULT", help="Directory filename suffix (default: DEFAULT)")
+
+
+def add_search_options(parser):
+    add_input_options(parser)
+    parser.add_argument("--host", help="Exact host, case-insensitive")
+    parser.add_argument("--share", help="Exact share, case-insensitive")
+    parser.add_argument("--path-prefix", help="Directory or path prefix, on component boundaries")
+    parser.add_argument("--contains", action="append", default=[],
+                        help="Literal substring of host/share/path; repeat for AND matching")
+    parser.add_argument("--extension", action="append", help="Suffix such as .ps1; repeat for OR matching")
+    parser.add_argument("--id", action="append", help="Exact ID; repeat for OR matching")
+    parser.add_argument("--min-bytes", type=nonnegative)
+    parser.add_argument("--max-bytes", type=nonnegative)
+    parser.add_argument("--created-after", type=iso_date, help="Inclusive creation date, YYYY-MM-DD")
+    parser.add_argument("--created-before", type=iso_date, help="Inclusive creation date, YYYY-MM-DD")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="CSV helpers for smbhoarder shell wrappers")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    search = subparsers.add_parser("search", help="Stream filtered CSV/JSONL rows (default limit: 100)")
+    add_search_options(search)
+    search.add_argument("--limit", type=nonnegative, default=100, help="Maximum rows; 0 explicitly exports all")
+    search.add_argument("--offset", type=nonnegative, default=0, help="Skip this many matching rows")
+    search.add_argument("--format", choices=["csv", "jsonl"], default="csv")
+    search.add_argument("--count", action="store_true", help="Print only total matching count; ignores limit/offset")
+    search.set_defaults(func=command_search)
+
+    summary = subparsers.add_parser("summary", help="JSON totals and top groups; scans all matching rows")
+    add_search_options(summary)
+    summary.add_argument("--group-by", choices=["host", "host-share", "extension"], default="host-share")
+    summary.add_argument("--limit", type=nonnegative, default=20, help="Maximum groups to show (default: 20)")
+    summary.set_defaults(func=command_summary)
+
+    validate = subparsers.add_parser("validate", help="Validate explicit download selection and emit CSV")
+    add_input_options(validate)
+    validate.set_defaults(func=command_validate)
 
     display = subparsers.add_parser("display", help="Render CSV as readable picker rows")
     display.add_argument("--aligned", action="store_true")
@@ -302,10 +500,22 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    result = args.func(args)
+    if getattr(args, "csv_dir", None) and args.files:
+        parser.error("use either --csv-dir or input files, not both")
+    if (getattr(args, "min_bytes", None) is not None and
+            getattr(args, "max_bytes", None) is not None and args.min_bytes > args.max_bytes):
+        parser.error("--min-bytes must not exceed --max-bytes")
+    if (getattr(args, "created_after", None) and getattr(args, "created_before", None)
+            and args.created_after > args.created_before):
+        parser.error("--created-after must not exceed --created-before")
+    try:
+        result = args.func(args)
+    except (OSError, ValueError, csv.Error) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     if isinstance(result, int):
-        sys.exit(result)
+        return result
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
