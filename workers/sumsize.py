@@ -15,7 +15,8 @@ def main():
             continue
         except IndexError:
             continue
-    print(f"Selected: {count} files, {total:.3f} MB")
+    size = f"{total / 1024:.3f} GB" if total >= 1024 else f"{total:.3f} MB"
+    print(f"Selected: {count} files, {size}")
 
 if __name__ == "__main__":
     main()

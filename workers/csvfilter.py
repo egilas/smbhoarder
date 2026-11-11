@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import base64
+import io
 import csv
 import os
 import sys
@@ -25,6 +27,33 @@ def iter_rows(stream):
         parsed = row_to_dict(row)
         if parsed:
             yield row[:len(FIELDS)], parsed
+
+
+def display_cell(value):
+    # Keep terminal controls and embedded line breaks out of the picker.
+    return "".join(char if char.isprintable() else " " for char in value)
+
+
+def command_display(args):
+    for row, _ in iter_rows(sys.stdin):
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="\r\n").writerow(row)
+        payload = base64.b64encode(buffer.getvalue().encode()).decode()
+        print("\t".join([*(display_cell(cell) for cell in row), payload]))
+
+
+def command_decode(args):
+    for line in sys.stdin:
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) != len(FIELDS) + 1:
+            raise ValueError("Invalid picker row")
+        sys.stdout.write(base64.b64decode(fields[-1], validate=True).decode())
+
+
+def format_size(size_mb):
+    if size_mb >= 1024:
+        return f"{size_mb / 1024:.3f} GB"
+    return f"{size_mb:.3f} MB"
 
 
 def group_key(row, mode):
@@ -61,8 +90,12 @@ def command_groups(args):
         except ValueError:
             pass
 
+    if args.include_all:
+        count = sum(info["count"] for info in groups.values())
+        size = sum(info["sizemb"] for info in groups.values())
+        print(f"__all_files__\t[All files] ({count} files, {format_size(size)})")
     for key, info in sorted(groups.items(), key=lambda item: (-item[1]["count"], item[0])):
-        label = f"{key} ({info['count']} files, {info['sizemb']:.3f} MB)"
+        label = f"{key} ({info['count']} files, {format_size(info['sizemb'])})"
         print(f"{key}\t{label}")
 
 
@@ -188,12 +221,18 @@ def build_parser():
     parser = argparse.ArgumentParser(description="CSV helpers for smbhoarder shell wrappers")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    display = subparsers.add_parser("display", help="Render CSV as readable picker rows")
+    display.set_defaults(func=command_display)
+    decode = subparsers.add_parser("decode", help="Restore selected picker rows to CSV")
+    decode.set_defaults(func=command_decode)
+
     catalog = subparsers.add_parser("catalog", help="Merge SMB CSV files without repeated headers")
     catalog.add_argument("files", nargs="+")
     catalog.set_defaults(func=command_catalog)
 
     groups = subparsers.add_parser("groups", help="Print fzf-selectable CSV chunks")
     groups.add_argument("--mode", choices=["host", "host-share", "extension"], required=True)
+    groups.add_argument("--include-all", action="store_true")
     groups.set_defaults(func=command_groups)
 
     filter_parser = subparsers.add_parser("filter", help="Filter CSV rows to one chunk")

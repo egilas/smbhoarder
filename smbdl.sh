@@ -28,8 +28,8 @@ FZF Keybindings:
   CTRL-A        = Toggle all
   CTRL-S        = Show host/share summary, sorted ascending
   ALT-S         = Show host/share summary, sorted descending
-  CTRL-F        = Show extension statistics, sorted ascending by file count
-  ALT-F         = Show extension statistics, sorted descending by file count
+  CTRL-F        = Choose extension filter, sorted ascending by file count
+  ALT-F         = Choose extension filter, sorted descending by file count
   CTRL-SPACE    = Download selected item(s)
 EOF
 }
@@ -247,8 +247,12 @@ extensions_asc_q=$(printf '%q' "$extensions_asc")
 extensions_desc_q=$(printf '%q' "$extensions_desc")
 ext_header_asc_q=$(printf '%q' "$section extension statistics, ascending by count. ESC or ENTER returns to search.")
 ext_header_desc_q=$(printf '%q' "$section extension statistics, descending by count. ESC or ENTER returns to search.")
-extensions_asc_cmd="test -s $extensions_asc_q || python3 $csvfilter_q extensions --sort asc < $catalog_q > $extensions_asc_q; fzf --no-sort --header-lines=1 --prompt 'extensions asc > ' --header $ext_header_asc_q < $extensions_asc_q >/dev/null"
-extensions_desc_cmd="test -s $extensions_desc_q || python3 $csvfilter_q extensions --sort desc < $catalog_q > $extensions_desc_q; fzf --no-sort --header-lines=1 --prompt 'extensions desc > ' --header $ext_header_desc_q < $extensions_desc_q >/dev/null"
+extension_choice="$tmpdir/extension-choice.txt"
+extension_choice_q=$(printf '%q' "$extension_choice")
+extensions_asc_cmd="test -s $extensions_asc_q || python3 $csvfilter_q extensions --sort asc < $catalog_q > $extensions_asc_q; : > $extension_choice_q; fzf --no-sort --header-lines=1 --prompt 'extensions asc > ' --header 'ENTER applies extension to search; ESC returns unchanged.' < $extensions_asc_q > $extension_choice_q || true"
+extensions_desc_cmd="test -s $extensions_desc_q || python3 $csvfilter_q extensions --sort desc < $catalog_q > $extensions_desc_q; : > $extension_choice_q; fzf --no-sort --header-lines=1 --prompt 'extensions desc > ' --header 'ENTER applies extension to search; ESC returns unchanged.' < $extensions_desc_q > $extension_choice_q || true"
+# fzf quotes {q} before substituting the current query into this shell command.
+extension_apply_cmd="current={q}; selected=\$(head -n 1 $extension_choice_q); extension=\${selected%% *}; if test -z \"\$selected\" || test \"\$extension\" = '[no'; then printf '%s\\n' \"\$current\"; else printf '%s %s\\n' \"\$current\" \"\$extension\"; fi"
 
 can_cat_view() {
   local file="$1"
@@ -325,26 +329,29 @@ run_file_picker() {
   local input_file="$1"
   local prompt="$2"
 
+  local display_file="$tmpdir/picker.tsv"
+  python3 "$workers/csvfilter.py" display < "$input_file" > "$display_file"
   fzf -e -m \
-    --delimiter=',' \
+    --delimiter=$'\t' --with-nth=1,2,3,4,5,6,7 \
+    --header $'ID\tHost\tShare\tPath\tSizeMB\tSizeBytes\tCreated' \
     --prompt "$prompt > " \
     --bind 'ctrl-a:toggle-all' \
     --bind "ctrl-s:execute($shares_asc_cmd)" \
     --bind "alt-s:execute($shares_desc_cmd)" \
-    --bind "ctrl-f:execute($extensions_asc_cmd)" \
-    --bind "alt-f:execute($extensions_desc_cmd)" \
+    --bind "ctrl-f:execute($extensions_asc_cmd)+transform-query~$extension_apply_cmd~" \
+    --bind "alt-f:execute($extensions_desc_cmd)+transform-query~$extension_apply_cmd~" \
     --bind "enter:execute($single_cmd)" \
-    --bind "ctrl-space:execute($dl_cmd < {+f}; printf '\nPress ENTER to return to search'; read -r _)+deselect-all" \
-    --preview "python3 $sumsize_q < {+f}" \
+    --bind "ctrl-space:execute(python3 $csvfilter_q decode < {+f} | $dl_cmd; printf '\nPress ENTER to return to search'; read -r _)+deselect-all" \
+    --preview "python3 $csvfilter_q decode < {+f} | python3 $sumsize_q" \
     --preview-window=up,2 \
-    < "$input_file" || true
+    < "$display_file" || true
 }
 
 if [[ "$chunk_mode" != "none" && "$row_count" -gt "$chunk_threshold" ]]; then
   echo "[*] Loaded $row_count rows. Chunking by $chunk_mode before opening fzf."
   while true; do
     group_line=$(
-      python3 "$workers/csvfilter.py" groups --mode "$chunk_mode" < "$catalog" |
+      python3 "$workers/csvfilter.py" groups --mode "$chunk_mode" --include-all < "$catalog" |
         fzf --delimiter=$'\t' --with-nth=2 --prompt "Choose chunk > " \
           --preview 'printf "%s\n" {2}' \
           --preview-window=up,1
@@ -352,6 +359,10 @@ if [[ "$chunk_mode" != "none" && "$row_count" -gt "$chunk_threshold" ]]; then
 
     group_key=${group_line%%$'\t'*}
     group_label=${group_line#*$'\t'}
+    if [[ "$group_key" == "__all_files__" ]]; then
+      run_file_picker "$catalog" "All files"
+      continue
+    fi
     chunk_file="$tmpdir/chunk.csv"
     python3 "$workers/csvfilter.py" filter --mode "$chunk_mode" --key "$group_key" < "$catalog" > "$chunk_file"
     run_file_picker "$chunk_file" "$group_key"
