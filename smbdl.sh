@@ -4,7 +4,7 @@ set -euo pipefail
 show_help() {
   cat <<EOF
 Usage:
-  $0 [-csv <csv_directory>] [-workers <dir_with_worker_script>] [-cfile <credential_file>] [-s <section>] [-out <output_dir>] [-chunk-threshold <rows>] [-chunk-mode <mode>] [-id <csv_id>] [-view] [-proxychains] [-help]
+  $0 [-csv <csv_directory>] [-workers <dir_with_worker_script>] [-cfile <credential_file>] [-s <section>] [-out <output_dir>] [-chunk-threshold <rows>] [-chunk-mode <mode>] [-col <columns>] [--space=N] [-id <csv_id>] [-view] [-proxychains] [-help]
 
 Parameters:
   -csv           Directory containing one or more CSV files (*.csv). Default: ./csv
@@ -17,6 +17,9 @@ Parameters:
                  Default: 100000
   -chunk-mode    How to split large result sets: host-share, host, extension, or none.
                  Default: host-share
+  -col           Visible columns in order, comma-separated (case-insensitive).
+                 Default: id,host,sizemb,sizebytes,created,share,path
+  --space=N      Spaces between columns (positive integer; default: 2).
   -id            Download a single row by CSV ID and exit.
   -view          After a single-ID download, open supported text-like files with cat <file> | fzf.
   -proxychains   Use proxychains -q when calling the Python downloader
@@ -43,6 +46,8 @@ out="./dl"
 use_proxychains=false
 chunk_threshold=100000
 chunk_mode="host-share"
+columns="id,host,sizemb,sizebytes,created,share,path"
+column_spacing=2
 download_id=""
 view_after_download=false
 
@@ -80,6 +85,26 @@ while [[ $# -gt 0 ]]; do
     -no-chunk)
       chunk_mode="none"
       shift
+      ;;
+    --space=*)
+      column_spacing="${1#*=}"
+      shift
+      ;;
+    --space)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --space requires a positive integer." >&2
+        exit 1
+      fi
+      column_spacing="$2"
+      shift 2
+      ;;
+    -col)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: -col requires a comma-separated column list." >&2
+        exit 1
+      fi
+      columns="$2"
+      shift 2
       ;;
     -id)
       download_id="$2"
@@ -147,6 +172,35 @@ if $use_proxychains && ! command -v proxychains &>/dev/null; then
   echo "Error: proxychains not found in PATH."
   exit 1
 fi
+
+if ! [[ "$column_spacing" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: --space must be a positive integer." >&2
+  exit 1
+fi
+
+# Keep the underlying picker row intact: fzf only rearranges visible fields.
+column_fields=""
+if [[ "$columns" == ,* || "$columns" == *, || "$columns" == *,,* ]]; then
+  echo "Error: -col must not contain empty column names." >&2
+  exit 1
+fi
+IFS=',' read -r -a column_names <<< "$columns"
+for column in "${column_names[@]}"; do
+  case "${column,,}" in
+    id) index=1 ;;
+    host) index=2 ;;
+    share) index=3 ;;
+    path) index=4 ;;
+    sizemb) index=5 ;;
+    sizebytes) index=6 ;;
+    created) index=7 ;;
+    *)
+      echo "Error: unknown column '$column'. Choose id,host,share,path,sizemb,sizebytes,created." >&2
+      exit 1
+      ;;
+  esac
+  column_fields+="${column_fields:+,}$index"
+done
 
 # Check CSV directory
 if [[ ! -d "$csvdir" ]]; then
@@ -252,7 +306,7 @@ extension_choice_q=$(printf '%q' "$extension_choice")
 extensions_asc_cmd="test -s $extensions_asc_q || python3 $csvfilter_q extensions --sort asc < $catalog_q > $extensions_asc_q; : > $extension_choice_q; fzf --no-sort --header-lines=1 --prompt 'extensions asc > ' --header 'ENTER applies extension to search; ESC returns unchanged.' < $extensions_asc_q > $extension_choice_q || true"
 extensions_desc_cmd="test -s $extensions_desc_q || python3 $csvfilter_q extensions --sort desc < $catalog_q > $extensions_desc_q; : > $extension_choice_q; fzf --no-sort --header-lines=1 --prompt 'extensions desc > ' --header 'ENTER applies extension to search; ESC returns unchanged.' < $extensions_desc_q > $extension_choice_q || true"
 # fzf quotes {q} before substituting the current query into this shell command.
-extension_apply_cmd="current={q}; selected=\$(head -n 1 $extension_choice_q); extension=\${selected%% *}; if test -z \"\$selected\" || test \"\$extension\" = '[no'; then printf '%s\\n' \"\$current\"; else printf '%s %s\\n' \"\$current\" \"\$extension\"; fi"
+extension_apply_cmd="current={q}; selected=\$(head -n 1 $extension_choice_q); extension=\${selected%% *}; extension=\${extension#\*}; if test -z \"\$selected\" || test \"\$extension\" = '[no'; then printf '%s\\n' \"\$current\"; else printf '%s %s\\n' \"\$current\" \"\$extension\"; fi"
 
 can_cat_view() {
   local file="$1"
@@ -330,10 +384,12 @@ run_file_picker() {
   local prompt="$2"
 
   local display_file="$tmpdir/picker.tsv"
-  python3 "$workers/csvfilter.py" display < "$input_file" > "$display_file"
+  local header_file="$tmpdir/picker-header.txt"
+  python3 "$workers/csvfilter.py" display --aligned --header-file "$header_file" \
+    --columns "$column_fields" --space "$column_spacing" < "$input_file" > "$display_file"
   fzf -e -m \
-    --delimiter=$'\t' --with-nth=1,2,3,4,5,6,7 \
-    --header $'ID\tHost\tShare\tPath\tSizeMB\tSizeBytes\tCreated' \
+    --delimiter=$'\t' --with-nth="$column_fields" \
+    --header "$(cat "$header_file")" --tabstop=1 \
     --prompt "$prompt > " \
     --bind 'ctrl-a:toggle-all' \
     --bind "ctrl-s:execute($shares_asc_cmd)" \

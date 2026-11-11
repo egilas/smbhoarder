@@ -5,6 +5,8 @@ import io
 import csv
 import os
 import sys
+import tempfile
+import unicodedata
 from collections import defaultdict
 
 
@@ -34,12 +36,42 @@ def display_cell(value):
     return "".join(char if char.isprintable() else " " for char in value)
 
 
+def cell_width(value):
+    return sum(0 if unicodedata.combining(char) else
+               2 if unicodedata.east_asian_width(char) in {"W", "F"} else 1
+               for char in value)
+
+
 def command_display(args):
-    for row, _ in iter_rows(sys.stdin):
-        buffer = io.StringIO()
-        csv.writer(buffer, lineterminator="\r\n").writerow(row)
-        payload = base64.b64encode(buffer.getvalue().encode()).decode()
-        print("\t".join([*(display_cell(cell) for cell in row), payload]))
+    # Spool rows to disk so measuring large catalogs does not retain them in RAM.
+    widths = [cell_width(field) for field in FIELDS]
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as spool:
+        for row, _ in iter_rows(sys.stdin):
+            buffer = io.StringIO()
+            csv.writer(buffer, lineterminator="\r\n").writerow(row)
+            payload = base64.b64encode(buffer.getvalue().encode()).decode()
+            cells = [display_cell(cell) for cell in row]
+            widths = [max(width, cell_width(cell)) for width, cell in zip(widths, cells)]
+            spool.write("\t".join([*cells, payload]) + "\n")
+
+        def emit(cells, payload):
+            if args.aligned:
+                cells = [cell + " " * (width - cell_width(cell) + args.space - 1)
+                         for cell, width in zip(cells, widths)]
+            print("\t".join([*cells, payload]))
+
+        if args.header_file:
+            indices = [int(value) - 1 for value in args.columns.split(",")]
+            header = (" " * args.space).join(FIELDS[index] + " " * (widths[index] - cell_width(FIELDS[index]))
+                              for index in indices).rstrip()
+            with open(args.header_file, "w", encoding="utf-8") as handle:
+                handle.write(header + "\n")
+        if args.header:
+            emit(FIELDS, "")
+        spool.seek(0)
+        for line in spool:
+            *cells, payload = line.rstrip("\n").split("\t")
+            emit(cells, payload)
 
 
 def command_decode(args):
@@ -222,6 +254,12 @@ def build_parser():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     display = subparsers.add_parser("display", help="Render CSV as readable picker rows")
+    display.add_argument("--aligned", action="store_true")
+    display.add_argument("--space", type=int, default=1)
+    display.add_argument("--header", action="store_true")
+    display.add_argument("--header-file", help="Write a space-aligned header separately")
+    display.add_argument("--columns", default="1,2,3,4,5,6,7",
+                         help="Field order for the separate header")
     display.set_defaults(func=command_display)
     decode = subparsers.add_parser("decode", help="Restore selected picker rows to CSV")
     decode.set_defaults(func=command_decode)

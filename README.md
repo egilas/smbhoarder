@@ -115,12 +115,40 @@ TAB         select entry
 CTRL-A      toggle all
 CTRL-S      show host/share summary, sorted ascending
 ALT-S       show host/share summary, sorted descending
-CTRL-F      show extension statistics, sorted ascending by count
-ALT-F       show extension statistics, sorted descending by count
+CTRL-F      choose extension filter, sorted ascending by count
+ALT-F       choose extension filter, sorted descending by count
 CTRL-SPACE  download selected item(s)
 ```
 
-`CTRL-S`, `ALT-S`, and the extension statistics open scrollable fzf views. Many terminals
+The file picker displays labeled, tab-separated columns (ID, host, share, path,
+size, and creation time), without CSV quoting. Selection totals use MB or GB.
+Use `-col` to choose visible columns and their order:
+
+```bash
+./smbdl.sh -csv csv -s DEFAULT -col id,host,share,path,sizemb
+./smbdl.sh -csv csv -s DEFAULT -col path,host,share
+```
+
+Column names are case-insensitive: `id`, `host`, `share`, `path`, `sizemb`,
+`sizebytes`, and `created`. The default order is `id,host,sizemb,sizebytes,created,share,path`.
+Columns align to the longest value in the current results, with two spaces
+between them by default. Set the gap with `--space=3` (or `--space 3`); the value must be
+a positive integer and applies to both headings and rows:
+
+```bash
+./smbdl.sh -col id,host,sizemb,share,path --space=3
+```
+
+Long paths at the end can be scrolled horizontally in fzf.
+Downloads and selection totals work even when ID or size columns are hidden.
+
+Original CSV values are preserved for downloads, including paths containing
+commas, quotes, tabs, or line breaks.
+
+`CTRL-S`, `ALT-S`, and the extension statistics open scrollable fzf views.
+Press ENTER on an extension to append its suffix (for example, `.ps1`, without
+the `*`) to the current search; ESC returns
+unchanged. Selecting `[no extension]` also returns unchanged. Many terminals
 do not expose `CTRL-SHIFT-F` as a distinct key from `CTRL-F`, so descending
 extension sort is bound to `ALT-F`.
 
@@ -143,7 +171,8 @@ select a smaller chunk before loading fzf:
 ./smbdl.sh -csv csv -s DEFAULT -no-chunk
 ```
 
-Chunk modes are `host-share`, `host`, `extension`, and `none`.
+Chunk modes are `host-share`, `host`, `extension`, and `none`. The chunk selector
+also offers `[All files]` to open the entire catalog.
 
 ## Diff Access Between Users
 
